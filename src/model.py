@@ -13,7 +13,8 @@ from mesa.space import MultiGrid
 import networkx as nx
 from collections import Counter
 from src.agent import Households
-from src.functions import get_connections_distribution_halfnormal, construct_network, rewire_for_preferential_attachment, find_homophily_indexes
+
+from src.functions import get_connections_distribution_halfnormal, construct_network, rewire_for_preferential_attachment, find_homophily_indexes, gini
 from mesa.datacollection import DataCollector
 from src.datacollection import model_datacollector, household_datacollector
 
@@ -77,11 +78,13 @@ class AdaptationModel(Model):
                  CCA_costs = {'dry-proofing': 10300, # see brainstorm document
                               'wet-proofing': 8000},
                  damage_reduction = {'dry-proofing': 0.5, # see brainstorm document
-                              'wet-proofing': 0.5},
+                              'wet-proofing': 0.4},
                  measures_aging = {'dry-proofing': 10, # 0 if no aging, int for number of years they age
                               'wet-proofing': 10},
                 transformative_threshold = 0.8, # adaptation uptake (any) after which the adaptation can be considered transformative
-                collect_agent_data = 0 # if 1, collect agent data, if 0, don't collect agent data 
+                collect_agent_data = 0, # if 1, collect agent data, if 0, don't collect agent data
+                savings_rate_multiplier = 1.0,
+                adaptation_cost_multiplier = 1.0
                  ):
         
         super().__init__(seed = seed)
@@ -95,6 +98,8 @@ class AdaptationModel(Model):
         self.threshold_severe_flood_exp = threshold_severe_flood_exp
         self.flood_time = flood_time
         self.population_density = population_density
+        self.savings_rate_multiplier = savings_rate_multiplier
+        self.adaptation_cost_multiplier = adaptation_cost_multiplier
         if sum(sum(inner_list) for inner_list in self.population_density) != self.nr_households:
             raise ValueError('Population distirbution is', self.population_density, 
                              ' and does not match the number of household agents. nr household agents:', 
@@ -134,6 +139,7 @@ class AdaptationModel(Model):
         
         self.cumulative_damage = 0
         self.cumulative_damage_no_adaptation = 0
+        self.total_damage_experienced = 0
         self.fraction_wet_proofed = 0
         self.fraction_dry_proofed = 0
         self.fraction_adapted_any = 0
@@ -261,7 +267,7 @@ class AdaptationModel(Model):
         
         cells_with_min_2_households = {cell: agents for cell, agents in self.cell_households.items() if len(agents) >= 2}
         if not cells_with_min_2_households:
-            print('Cannot make niehgbor connection because there are no households that share a cell')
+            print('Cannot make neighbor connection because there are no households that share a cell')
         #print(cells_with_min_2_households)
         
         for edge in neighbor_edges: 
@@ -655,6 +661,7 @@ class AdaptationModel(Model):
 
         cumulative_damage = 0
         cumulative_damage_no_adaptation = 0
+        total_damage_experienced = 0
         HH_adapted_wp = 0
         HH_adapted_dp = 0
         HH_adapted_any = 0
@@ -666,20 +673,131 @@ class AdaptationModel(Model):
         sum_intention_overall_DP = 0
         sum_intention_overall_WP = 0
 
+        sum_worry = 0
+        sum_perceived_risk = 0
+        sum_savings = 0
+        sum_flood_damage = 0
+
+        # Additional state-space variables
+        households_with_expiry = 0
+
+        active_measure_ages = []
+        active_measure_remaining_lifetimes = []
+
+        sum_fraction_connections_adapted = 0
+        agents_with_connections = 0
+
         HH_severe_flood_exp = 0
         HH_severe_adapted_any = 0
 
+        liquidity_constrained = 0
+        unmet_adaptation_demand = 0
+
+        # Including initial adaptation value
+        relative_burdens = []
+        relative_burdens_cumulative_income = []
+
+        # Simulation period only
+        relative_burdens_simulation_only = []
+        relative_burdens_cumulative_income_simulation_only = []
+
+        low = [a for a in self.agents if a.income_category in [1,2]]
+        mid = [a for a in self.agents if a.income_category == 3]
+        high = [a for a in self.agents if a.income_category in [4,5]]
+
+        def adapted_rate(group):
+            if len(group) == 0:
+                return 0
+            return sum(1 for a in group if 1 in a.measures_taken.values()) / len(group)
+
+        self.adaptation_rate_low = adapted_rate(low)
+        self.adaptation_rate_middle = adapted_rate(mid)
+        self.adaptation_rate_high = adapted_rate(high)
+        self.adaptation_gap_high_low = self.adaptation_rate_high - self.adaptation_rate_low
+
+        agents_by_id = {
+            agent.unique_id: agent
+            for agent in self.agents
+        }
+
         for agent in self.agents:
+
+            agent.calculate_optimal_adaptation()
+
+            actually_adapted = 1 in agent.measures_taken.values()
+
+            agent.adaptation_deficit = (
+                    agent.optimal_to_adapt and not actually_adapted
+            )
+
+            agent.over_adapted = (
+                    (not agent.optimal_to_adapt) and actually_adapted
+            )
+
+            min_cost_remaining = min(
+                self.CCA_costs[m] * self.adaptation_cost_multiplier
+                for m in self.CCA_costs
+                if agent.measures_taken[m] == 0
+            ) if any(agent.measures_taken[m] == 0 for m in self.CCA_costs) else 0
+
             # damage
             cumulative_damage += round(agent.flood_damage, 0)
             cumulative_damage_no_adaptation += round(agent.flood_damage_no_measures, 0)
-            
+            total_damage_experienced += agent.damage_experienced
+
+            if agent.measure_expired_this_step:
+                households_with_expiry += 1
+
+
+            if agent.nr_connected_HHagents > 0:
+                adapted_connections = sum(
+                    1
+                    for connection_id in agent.connected_HHagents
+                    if 1 in agents_by_id[
+                        connection_id
+                    ].measures_taken.values()
+                )
+
+                fraction_connections_adapted = (
+                        adapted_connections
+                        / agent.nr_connected_HHagents
+                )
+
+                sum_fraction_connections_adapted += (
+                    fraction_connections_adapted
+                )
+
+                agents_with_connections += 1
+
+
+
+            for measure, taken in agent.measures_taken.items():
+                if taken == 1:
+                    lifetime = self.measures_aging[measure]
+
+                    if lifetime > 0:
+                        age = agent.age_of_measures[measure]
+
+                        active_measure_ages.append(age)
+
+                        active_measure_remaining_lifetimes.append(
+                            max(lifetime - age, 0)
+                        )
+
+
+
             # adaptation intention
             sum_intention_SN += agent.prob_from_social_norm
             sum_intention_PMT_DP += agent.protection_motivation['dry-proofing']
             sum_intention_PMT_WP += agent.protection_motivation['wet-proofing']
             sum_intention_overall_DP += agent.probability_to_take_measure['dry-proofing']
             sum_intention_overall_WP += agent.probability_to_take_measure['wet-proofing']
+
+            # Additional agent vars
+            sum_worry += agent.worry
+            sum_perceived_risk += agent.perceived_risk
+            sum_savings += agent.savings
+            sum_flood_damage += agent.flood_damage
 
             # adaptation
             if (agent.measures_taken['dry-proofing'] == 1) and (agent.measures_taken['wet-proofing'] == 1):
@@ -699,7 +817,90 @@ class AdaptationModel(Model):
                 if (agent.measures_taken['dry-proofing'] == 1) or (agent.measures_taken['wet-proofing'] == 1):
                     HH_severe_adapted_any += 1
 
-            
+            if min_cost_remaining > 0 and agent.savings < min_cost_remaining:
+                liquidity_constrained += 1
+
+            if agent.could_not_afford > 0:
+                unmet_adaptation_demand += 1
+
+            annual_income = max(agent.income, 1)
+
+            # Costs during simulation only
+            simulation_costs = (
+                    agent.damage_experienced
+                    + agent.adaptation_cost_paid
+            )
+
+            # Costs including the remaining value of measures already present at t=0
+            total_costs = (
+                    simulation_costs
+                    + agent.initial_adaptation_value
+            )
+
+            years_elapsed = self.steps + 1
+            cumulative_income = annual_income * years_elapsed
+
+            # Annual-income burden
+            relative_burdens.append(total_costs / annual_income)
+            relative_burdens_simulation_only.append(simulation_costs / annual_income)
+
+            # Cumulative-income burden
+            relative_burdens_cumulative_income.append(
+                total_costs / cumulative_income
+            )
+
+            relative_burdens_cumulative_income_simulation_only.append(
+                simulation_costs / cumulative_income
+            )
+
+        # Experienced flood damage
+        self.total_damage_experienced = total_damage_experienced
+
+        self.average_damage_experienced = (
+                total_damage_experienced / self.nr_households
+        )
+
+        # Expired adaptation
+        self.share_households_with_expiry = (
+                households_with_expiry / self.nr_households
+        )
+
+        # Age of currently active adaptation measures
+        self.average_active_measure_age = (
+            np.mean(active_measure_ages)
+            if active_measure_ages
+            else 0
+        )
+
+        self.average_remaining_measure_lifetime = (
+            np.mean(active_measure_remaining_lifetimes)
+            if active_measure_remaining_lifetimes
+            else 0
+        )
+
+        # Network exposure to adapted households
+        self.average_fraction_connections_adapted = (
+            sum_fraction_connections_adapted
+            / agents_with_connections
+            if agents_with_connections > 0
+            else 0
+        )
+
+        self.share_optimal_to_adapt = (
+                sum(a.optimal_to_adapt for a in self.agents)
+                / self.nr_households
+        )
+
+        self.share_adaptation_deficit = (
+                sum(a.adaptation_deficit for a in self.agents)
+                / self.nr_households
+        )
+
+        self.share_over_adapted = (
+                sum(a.over_adapted for a in self.agents)
+                / self.nr_households
+        )
+
         self.cumulative_damage = cumulative_damage
         self.cumulative_damage_no_adaptation = cumulative_damage_no_adaptation
         self.fraction_wet_proofed = HH_adapted_wp/self.nr_households
@@ -718,7 +919,12 @@ class AdaptationModel(Model):
         self.avg_intention_PMT_WP = round(sum_intention_PMT_WP/self.nr_households, 4)
         self.avg_intention_overall_DP = round(sum_intention_overall_DP/self.nr_households, 4)
         self.avg_intention_overall_WP = round(sum_intention_overall_WP/self.nr_households, 4)
-        
+
+        self.average_worry = sum_worry / self.nr_households
+        self.average_perceived_risk = sum_perceived_risk / self.nr_households
+        self.average_savings = sum_savings / self.nr_households
+        self.average_flood_damage = sum_flood_damage / self.nr_households
+
         # check if adaptation transformative
         if self.fraction_adapted_any >= self.transformative_threshold:
             self.transformative_adaptation = 1
@@ -782,10 +988,42 @@ class AdaptationModel(Model):
             if (agent.measures_taken['dry-proofing'] == 0) and (agent.measures_taken['wet-proofing'] == 1):
                 self.HH_adapted_wp_21 += 1
                 self.HH_adapted_any_21 += 1
+
+        self.share_liquidity_constrained = liquidity_constrained / self.nr_households
+        self.share_unmet_adaptation_demand = unmet_adaptation_demand / self.nr_households
+        # print("relative_burdens len:", len(relative_burdens))
+        # print("relative_burdens min:", min(relative_burdens))
+        # print("relative_burdens max:", max(relative_burdens))
+        # print("relative_burdens first 10:", relative_burdens[:10])
+        # print("liquidity constrained count:", liquidity_constrained)
+        # print("unmet demand count:", unmet_adaptation_demand)
+        self.gini_relative_burden = gini(
+            relative_burdens
+        )
+
+        self.gini_relative_burden_cumulative_income = gini(
+            relative_burdens_cumulative_income
+        )
+
+        self.gini_relative_burden_simulation_only = gini(
+            relative_burdens_simulation_only
+        )
+
+        self.gini_relative_burden_cumulative_income_simulation_only = gini(
+            relative_burdens_cumulative_income_simulation_only
+        )
+
+        self.average_relative_burden = np.mean(
+            relative_burdens
+        )
+
+        self.average_relative_burden_cumulative_income = np.mean(
+            relative_burdens_cumulative_income
+        )
  
     def step(self):
         #print('step:', self.steps)
-        print('adapted', self.fraction_adapted_any)
+        # print('adapted', self.fraction_adapted_any)
         
         self.flood_shock = False
         if self.steps in self.flood_time:

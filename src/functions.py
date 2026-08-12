@@ -7,7 +7,7 @@ Functions get called by the Model and Agent class.
 """
 import numpy as np
 import random
-from scipy.stats import halfnorm
+
 import networkx as nx
 
 
@@ -20,7 +20,9 @@ def get_connections_distribution_halfnormal(target_cdf, upper_bound, end_value):
     upper_bound: value where target_cdf % of connections should be in.
     end_value: end of the tail. Maximum number of connections
     """
-    
+    print("functions.py: before scipy")
+    from scipy.stats import halfnorm
+    print("functions.py: after scipy")
     # Solve for the scale parameter of the half-normal distribution
     scale = upper_bound / halfnorm.ppf(target_cdf)
 
@@ -130,3 +132,12 @@ def decrease_rate_worry_in_flood_remembrance_period(worry_pre_flood,
             return None # shouldn't happen for worry_pre_flood <= 1 - increase_worry
         worry_decrease_rate = 1 - target_ratio ** (1/flood_remembrance_period)
     return worry_decrease_rate
+
+def gini(values):
+    values = np.array(values)
+    if np.amin(values) < 0:
+        values -= np.amin(values)
+    values += 1e-9
+    values = np.sort(values)
+    n = len(values)
+    return (2 * np.sum((np.arange(1, n + 1) * values)) / (n * np.sum(values))) - (n + 1) / n

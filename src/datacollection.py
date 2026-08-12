@@ -87,7 +87,32 @@ def model_datacollector():
          'avg_intention_PMT_DP': lambda m: m.avg_intention_PMT_DP,
          'avg_intention_PMT_WP': lambda m: m.avg_intention_PMT_WP,
          'avg_intention_overall_DP': lambda m: m.avg_intention_overall_DP,
-         'avg_intention_overall_WP': lambda m: m.avg_intention_overall_WP
+         'avg_intention_overall_WP': lambda m: m.avg_intention_overall_WP,
+
+        "average_worry": lambda m: m.average_worry,
+        "average_perceived_risk": lambda m: m.average_perceived_risk,
+        "average_savings": lambda m: m.average_savings,
+        "average_flood_damage": lambda m: m.average_flood_damage,
+
+        "total_damage_experienced": lambda m: m.total_damage_experienced,
+        "average_damage_experienced": lambda m: m.average_damage_experienced,
+        "share_households_with_expiry": lambda m: m.share_households_with_expiry,
+        "average_active_measure_age": lambda m: m.average_active_measure_age,
+        "average_remaining_measure_lifetime": lambda m: m.average_remaining_measure_lifetime,
+        "average_fraction_connections_adapted": lambda m: m.average_fraction_connections_adapted,
+
+        "share_liquidity_constrained": lambda m: m.share_liquidity_constrained,
+        "share_unmet_adaptation_demand": lambda m: m.share_unmet_adaptation_demand,
+        "gini_relative_burden": lambda m: m.gini_relative_burden,
+        "adaptation_gap_high_low": lambda m: m.adaptation_gap_high_low,
+        "gini_relative_burden_cumulative_income": lambda m: m.gini_relative_burden_cumulative_income,
+        "average_relative_burden": lambda m: m.average_relative_burden,
+        "average_relative_burden_cumulative_income": lambda m: m.average_relative_burden_cumulative_income,
+        "share_optimal_to_adapt": lambda m: m.share_optimal_to_adapt,
+        "share_adaptation_deficit": lambda m: m.share_adaptation_deficit,
+        "share_over_adapted": lambda m: m.share_over_adapted,
+        "gini_relative_burden_simulation_only": lambda m: m.gini_relative_burden_simulation_only,
+        "gini_relative_burden_cumulative_income_simulation_only": lambda m: m.gini_relative_burden_cumulative_income_simulation_only,
         }
     
     return model_datacollector

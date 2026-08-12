@@ -8,8 +8,8 @@ File to generate the household agents
 from mesa import Agent
 import pandas as pd
 import numpy as np
-import random
 from src.functions import logistic_adapted_to_SN, decrease_rate_worry_in_flood_remembrance_period
+import random
 #import math
 
 import warnings
@@ -100,32 +100,122 @@ class Households(Agent):
         # social influence/norms related
         self.fraction_in_network_adapted = 0 # update later
         if self.model.per_HH_adapted_to_SN_prob_midpoint == 'uniform':
-            print('uniform')
+            # print('uniform')
             self.own_per_HH_adapted_to_SN_prob_midpoint = round(random.uniform(0.3, 0.8), 2)
         else:
             self.own_per_HH_adapted_to_SN_prob_midpoint = self.model.per_HH_adapted_to_SN_prob_midpoint
         
-        print('midpoint', self.own_per_HH_adapted_to_SN_prob_midpoint)
+        # print('midpoint', self.own_per_HH_adapted_to_SN_prob_midpoint)
 
         self.protection_motivation = {'dry-proofing': 0,
                                       'wet-proofing': 0} # calculate later
         self.prob_from_social_norm = 0
         self.probability_to_take_measure = {'dry-proofing': 0,
                                             'wet-proofing': 0} # calculate later
+        self.adaptation_cost_paid = 0
+        self.initial_adaptation_value = 0
+        self.liquidity_constrained = 0
+        self.measure_expired_this_step = False
         # if measure taken, make it anything between 0 and age measure
-        self.age_of_measures = {'dry-proofing': 0,
-                                'wet-proofing': 0}
-        for measure in self.measures_taken.keys():
+        self.age_of_measures = {
+            "dry-proofing": 0,
+            "wet-proofing": 0,
+        }
+
+        for measure in self.measures_taken:
             if self.measures_taken[measure] == 1:
-                age = random.randint(0, self.model.measures_aging[measure])
-                # print(measure, 'age', age)
-                self.age_of_measures[measure] = age
+                lifetime = self.model.measures_aging[measure]
+
+                if lifetime > 0:
+                    minimum_remaining_lifetime = 5
+                    maximum_initial_age = max(
+                        0,
+                        lifetime - minimum_remaining_lifetime
+                    )
+
+                    self.age_of_measures[measure] = random.randint(
+                        0,
+                        maximum_initial_age
+                    )
+
+                    cost = (
+                            self.model.CCA_costs[measure]
+                            * self.model.adaptation_cost_multiplier
+                    )
+
+                    remaining_lifetime = (
+                            lifetime - self.age_of_measures[measure]
+                    )
+
+                    self.initial_adaptation_value += (
+                            cost
+                            * remaining_lifetime
+                            / lifetime
+                    )
         # print(self.measures_taken)
         #print(self.age_of_measures)
         
         self.steps_since_tried_to_take_measure = 0
+        self.wanted_to_adapt = 0
+        self.could_not_afford = 0
 
-        
+
+        # Rational benchmark
+        self.optimal_to_adapt = False
+        self.adaptation_deficit = False
+        self.over_adapted = False
+        self.avoided_damage = 0
+
+    def calculate_optimal_adaptation(self):
+
+        # Damage factor based only on flood depth
+        self.flood_depth = self.model.flood_depth_in_m[self.pos[1]]
+
+        if self.flood_depth >= 6 or self.flood_depth == 0:
+            damage_factor = 1 if self.flood_depth >= 6 else 0
+        else:
+            damage_factor = round(
+                0.0065 * (self.flood_depth ** self.flood_depth)
+                - 0.0896 * (self.flood_depth ** 2)
+                + 0.457 * self.flood_depth,
+                2,
+                )
+
+        damage_without = (
+                damage_factor
+                * self.model.max_damage_per_sqm
+                * self.house_size
+        )
+
+        # Dry-proofing
+        dry_damage = (
+                (1 - self.model.damage_reduction["dry-proofing"])
+                * damage_without
+        )
+        dry_avoided = damage_without - dry_damage
+        dry_cost = (
+                self.model.CCA_costs["dry-proofing"]
+                * self.model.adaptation_cost_multiplier
+        )
+
+        # Wet-proofing
+        wet_damage = (
+                (1 - self.model.damage_reduction["wet-proofing"])
+                * damage_without
+        )
+        wet_avoided = damage_without - wet_damage
+        wet_cost = (
+                self.model.CCA_costs["wet-proofing"]
+                * self.model.adaptation_cost_multiplier
+        )
+
+        self.optimal_to_adapt = (
+                dry_avoided > dry_cost
+                or
+                wet_avoided > wet_cost
+        )
+
+        self.avoided_damage = max(dry_avoided, wet_avoided)
         
     def get_connected_HHagents(self):
         # get a list of the household agents they are connected to
@@ -226,16 +316,22 @@ class Households(Agent):
 
         """
         random.seed(self.seed)
-        
+
+        cost = self.model.CCA_costs[measure] * self.model.adaptation_cost_multiplier
+
         if random.random() < self.probability_to_take_measure[measure]:
+            self.wanted_to_adapt += 1
             #print('want to take measure')
             #print('savings', self.savings, 'costs', CCA_costs[measure])
-            if self.savings > self.model.CCA_costs[measure]:
+            if self.savings >= cost:
                 #print('will take measure')
                 self.flood_damage = self.calculate_flood_damage() # update flood damage after taking measure
-                self.savings -=  self.model.CCA_costs[measure]
+                self.savings -=  cost
+                self.adaptation_cost_paid += cost
                 self.measures_taken[measure] = 1
                 #print(self.measures_taken)
+            else:
+                self.could_not_afford += 1
                 
     def age_measures(self):
         """
@@ -251,11 +347,15 @@ class Households(Agent):
                 if self.measures_taken[measure] == 1:
                     self.age_of_measures[measure] += 1 # age measures by 1 
                 #print(self.age_of_measures[measure], self.model.measures_aging[measure])
-                if self.age_of_measures[measure] == self.model.measures_aging[measure]:
+                if (
+                        self.age_of_measures[measure]
+                        >= self.model.measures_aging[measure]
+                ):
                     # if measures age same as end of life age, remove the measure and set the age back to 0
                     #print(measure, 'reached end of life')
                     self.measures_taken[measure] = 0
                     self.age_of_measures[measure] = 0
+                    self.measure_expired_this_step = True
         #print(self.measures_taken, self.age_of_measures)
             
         
@@ -384,7 +484,10 @@ class Households(Agent):
        
     def save_money(self):
         # add a perceptage of the income to the savings
-        self.savings = round(self.savings + self.income * self.model.prop_inc_for_damage_adaptation, 0)
+        self.savings = round(
+            self.savings + self.income * self.model.prop_inc_for_damage_adaptation * self.model.savings_rate_multiplier,
+            0
+        )
         
     def experience_flood_shock(self):
         # experiencing a flood
@@ -408,15 +511,16 @@ class Households(Agent):
     def calculate_worry(self):
         # while in personal flood remembrance period, decrease worry with worry_decrease_rate
         # print('before decrease', self.worry)
-        print(self.worry_decrease_rate)
+        # print(self.worry_decrease_rate)
         if self.worry_decrease_rate:
             self.worry -= self.worry * self.worry_decrease_rate
             # worry should not be 0
-            if self.worry > self.model.min_worry_after_flood:
+            if self.worry < self.model.min_worry_after_flood:
                 self.worry = self.model.min_worry_after_flood
             # print('after decrease', self.worry)
     
     def step(self):
+        self.measure_expired_this_step = False
         self.save_money()
         self.get_connected_HHagents()
         self.get_own_district() # not moving so could also only do this once
@@ -426,11 +530,15 @@ class Households(Agent):
             for flood_time in self.model.flood_time:
                 if (self.model.steps > flood_time) and (self.model.steps <= flood_time + self.personal_flood_remembrance_period):
                     # print('update worry')
-                    print(self.worry_decrease_rate)
+                    # print(self.worry_decrease_rate)
                     self.calculate_worry()
 
         if self.nr_connected_HHagents > 0:# if no connections, no influence on perceptions from network and social norm
             self.influence_of_network_on_PMT_perceptions()
+
+        # Update derived variable
+        self.perceived_risk = self.perceived_probability * self.perceived_severity
+
         self.influence_of_social_norm()
         # print(self.unique_id, 'savings', self.savings)
         self.calculate_probability_to_take_measure_PMT('dry-proofing', 'wet-proofing')
@@ -448,6 +556,19 @@ class Households(Agent):
                 #print('trying to take WP measure')
                 self.try_to_take_measure('wet-proofing')
                     #print('damage WP', self.flood_damage)
+        self.calculate_optimal_adaptation()
+
+        actually_adapted = 1 in self.measures_taken.values()
+
+        self.adaptation_deficit = (
+                self.optimal_to_adapt
+                and not actually_adapted
+        )
+
+        self.over_adapted = (
+                (not self.optimal_to_adapt)
+                and actually_adapted
+        )
         self.age_measures()
         
         self.calculate_flood_damage()
